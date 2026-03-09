@@ -1,0 +1,18 @@
+# 환경변수 / 비밀키
+.env
+
+# OAuth 인증 파일 (민감 정보 - HF Secrets에 넣을 것)
+youtube_token.json
+youtube_credentials.json
+
+# 채널 목록 (HF Secrets에 넣을 것)
+channels.txt
+
+# DB
+seen_videos.sqlite
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.log
