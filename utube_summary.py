@@ -172,20 +172,30 @@ async def _handle_update(update: Update):
     """수신된 Telegram 업데이트 처리."""
     global _send_chat_id
 
-    if not update.message or not update.message.text:
-        return
+    try:
+        if not update.message or not update.message.text:
+            logger.info("메시지 없는 업데이트 (무시): update_id=%s", update.update_id)
+            return
 
-    chat_id = str(update.effective_chat.id)
-    text = update.message.text.strip().lower()
+        chat_id = str(update.effective_chat.id)
+        text = update.message.text.strip()
+        logger.info("메시지 수신: chat_id=%s, text=%r", chat_id, text)
 
-    if not _send_chat_id:
-        _send_chat_id = chat_id
-        logger.info("chat_id 저장: %s", chat_id)
+        if not _send_chat_id:
+            _send_chat_id = chat_id
+            logger.info("chat_id 저장: %s", chat_id)
 
-    triggers = ("요약", "summary", "/summary", "/start", "start", "새 영상")
-    if any(t in text for t in triggers):
-        await _bot.send_message(chat_id=chat_id, text="🔄 새 영상 요약을 시작합니다...")
-        await _do_summarize_and_send(chat_id)
+        text_lower = text.lower()
+        triggers = ("요약", "summary", "/summary", "/start", "start", "새 영상")
+        if any(t in text_lower for t in triggers):
+            logger.info("트리거 감지 → 요약 시작: %r", text)
+            await _bot.send_message(chat_id=chat_id, text="🔄 새 영상 요약을 시작합니다...")
+            await _do_summarize_and_send(chat_id)
+        else:
+            logger.info("트리거 없음 → 무시: %r", text)
+
+    except Exception as e:
+        logger.exception("_handle_update 에러: %s", e)
 
 
 # ── 백그라운드: 봇 초기화 + Webhook 등록 (재시도 포함) ────────────────
@@ -236,9 +246,9 @@ async def _init_bot_with_retry():
 
 # ── FastAPI 엔드포인트 ────────────────────────────────────────────────
 
-@fastapi_app.get("/")
+@fastapi_app.api_route("/", methods=["GET", "HEAD"])
 async def health_check():
-    """헬스체크 / 상태 확인."""
+    """헬스체크 / 상태 확인 (GET + HEAD 지원)."""
     return {
         "status": "ok",
         "bot_ready": _bot_ready,
@@ -269,6 +279,7 @@ async def telegram_webhook(request: Request):
         return {"ok": False, "error": "bot not ready"}
     try:
         data = await request.json()
+        logger.info("Webhook 수신 raw: %s", data)
         update = Update.de_json(data, _bot)
         asyncio.create_task(_handle_update(update))
     except Exception as e:
