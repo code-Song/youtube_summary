@@ -8,16 +8,28 @@ from youtube_fetcher import VideoInfo
 
 
 def get_transcript(video_id: str) -> Optional[str]:
-    """자막 추출. 자막 없으면 None."""
+    """자막 추출. 한국어 우선 → 영어 → None."""
     try:
         from youtube_transcript_api import YouTubeTranscriptApi
         from youtube_transcript_api._errors import TranscriptsDisabled, NoTranscriptFound
-        try:
-            transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
-        except (TranscriptsDisabled, NoTranscriptFound):
-            return None
-        text = " ".join(t["text"] for t in transcript_list)
-        return text.strip() if text else None
+
+        api = YouTubeTranscriptApi()
+
+        # 한국어 → 영어 순서로 시도
+        for lang in (["ko"], ["en"], None):
+            try:
+                if lang is None:
+                    # 마지막 시도: 사용 가능한 아무 자막
+                    fetched = api.fetch(video_id)
+                else:
+                    fetched = api.fetch(video_id, languages=lang)
+                text = " ".join(s.text for s in fetched)
+                return text.strip() if text else None
+            except NoTranscriptFound:
+                continue
+            except TranscriptsDisabled:
+                return None
+        return None
     except ImportError:
         return None
 
