@@ -3,11 +3,13 @@
 구독 유튜버 새 영상 요약 서비스
 - 매일 아침 6시 요약 전송
 - 텔레그램에서 "요약해줘" 등 메시지 보내면 즉시 요약 전송 (스트리밍)
+- HF Spaces: Webhook 방식 (Polling 대신)
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -16,6 +18,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from fastapi import FastAPI, Request
+from telegram import Bot, Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from config import (
     DAILY_HOUR,
@@ -34,13 +39,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# 전역: 보낼 chat_id (첫 메시지에서 설정)
+# ── 환경변수 ──────────────────────────────────────────────────────────
+# HF Spaces에서는 SPACE_HOST 환경변수가 자동으로 설정됨
+# 예: codeSong-youtube-summary.hf.space
+SPACE_HOST = os.environ.get("SPACE_HOST", "")
+WEBHOOK_URL = f"https://{SPACE_HOST}/webhook" if SPACE_HOST else ""
+PORT = int(os.environ.get("PORT", "7860"))
+
+# 전역: 보낼 chat_id
 _send_chat_id: str | None = TELEGRAM_CHAT_ID or None
+
+# ── FastAPI 앱 및 Telegram Application ───────────────────────────────
+fastapi_app = FastAPI()
+ptb_app: Application | None = None
 
 
 async def _send_telegram(chat_id: str, text: str):
     """텔레그램으로 메시지 전송 (4096자 제한 처리)."""
-    from telegram import Bot
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
     for i in range(0, len(text), 4096):
         await bot.send_message(chat_id=chat_id, text=text[i:i + 4096])
@@ -48,7 +63,6 @@ async def _send_telegram(chat_id: str, text: str):
 
 async def _do_summarize_and_send(chat_id: str):
     """새 영상 조회 → 스트리밍 요약 → 실시간 텔레그램 전송."""
-    from telegram import Bot
     bot = Bot(token=TELEGRAM_BOT_TOKEN)
 
     try:
@@ -61,7 +75,6 @@ async def _do_summarize_and_send(chat_id: str):
         await _send_telegram(chat_id, f"🔍 새 영상 {len(new_ones)}개를 요약합니다...")
 
         for idx, video in enumerate(new_ones, 1):
-            # ── 1) 시작 메시지 전송 ──────────────────────────────────────
             header = (
                 f"📺 [{idx}/{len(new_ones)}] {video.channel_title}\n"
                 f"제목: {video.title}\n"
@@ -73,7 +86,6 @@ async def _do_summarize_and_send(chat_id: str):
 
             transcript = get_transcript(video.video_id)
 
-            # ── 2) 자막 없는 경우 ────────────────────────────────────────
             if not transcript:
                 no_sub = (
                     f"📺 [{idx}/{len(new_ones)}] {video.channel_title}\n"
@@ -87,14 +99,12 @@ async def _do_summarize_and_send(chat_id: str):
                 mark_seen(video.video_id, video.channel_id, video.channel_title, video.title)
                 continue
 
-            # ── 3) Gemini 스트리밍 요약 ──────────────────────────────────
             accumulated = ""
             last_sent_len = 0
 
             async def on_chunk(part: str, _msg_id=msg_id, _idx=idx, _video=video):
                 nonlocal accumulated, last_sent_len
                 accumulated += part
-                # 80자 이상 쌓이거나 문장 종결 부호면 메시지 편집
                 new_chars = len(accumulated) - last_sent_len
                 ends_sentence = accumulated and accumulated[-1] in (".", "!", "?", "\n")
                 if new_chars >= 80 or ends_sentence:
@@ -112,7 +122,7 @@ async def _do_summarize_and_send(chat_id: str):
                         )
                         last_sent_len = len(accumulated)
                     except Exception:
-                        pass  # rate limit 등은 무시
+                        pass
 
             try:
                 summary = await summarize_with_gemini_stream(
@@ -124,7 +134,6 @@ async def _do_summarize_and_send(chat_id: str):
                 summary = f"(요약 실패: {e})"
                 mark_seen(video.video_id, video.channel_id, video.channel_title, video.title)
 
-            # ── 4) 최종 완성 메시지로 편집 ──────────────────────────────
             final_text = (
                 f"📺 [{idx}/{len(new_ones)}] {video.channel_title}\n"
                 f"제목: {video.title}\n"
@@ -138,7 +147,6 @@ async def _do_summarize_and_send(chat_id: str):
                     text=final_text[:4096],
                 )
             except Exception:
-                # 편집 실패 시 새 메시지로 전송
                 await _send_telegram(chat_id, final_text)
 
         await _send_telegram(chat_id, f"✅ 전체 {len(new_ones)}개 요약이 완료되었습니다!")
@@ -159,7 +167,7 @@ async def _daily_job():
     await _do_summarize_and_send(cid)
 
 
-async def _on_message(update, context):
+async def _on_message(update: Update, context):
     """텔레그램 메시지 수신 시 (요약해줘, /summary 등)."""
     global _send_chat_id
     chat_id = str(update.effective_chat.id)
@@ -175,36 +183,76 @@ async def _on_message(update, context):
         await _do_summarize_and_send(chat_id)
 
 
-def main():
+# ── FastAPI 엔드포인트 ────────────────────────────────────────────────
+
+@fastapi_app.get("/")
+async def health_check():
+    """HF Spaces 헬스체크 / 상태 확인."""
+    return {"status": "ok", "webhook": WEBHOOK_URL or "not set"}
+
+
+@fastapi_app.post("/webhook")
+async def telegram_webhook(request: Request):
+    """Telegram이 보내는 업데이트를 수신."""
+    if ptb_app is None:
+        return {"ok": False, "error": "bot not initialized"}
+    data = await request.json()
+    update = Update.de_json(data, ptb_app.bot)
+    await ptb_app.process_update(update)
+    return {"ok": True}
+
+
+# ── 앱 시작/종료 이벤트 ───────────────────────────────────────────────
+
+@fastapi_app.on_event("startup")
+async def on_startup():
+    """서버 시작 시: Telegram 봇 초기화 + Webhook 등록 + 스케줄러 시작."""
+    global ptb_app
+
     if not TELEGRAM_BOT_TOKEN:
-        print("TELEGRAM_BOT_TOKEN이 .env에 설정되지 않았습니다.")
-        print("텔레그램 @BotFather 에서 봇을 만들고 토큰을 .env에 넣으세요.")
-        sys.exit(1)
+        logger.error("TELEGRAM_BOT_TOKEN이 설정되지 않았습니다!")
+        return
 
-    from telegram.ext import Application, CommandHandler, MessageHandler, filters
+    # PTB Application 빌드
+    ptb_app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    ptb_app.add_handler(MessageHandler(filters.TEXT, _on_message))
+    ptb_app.add_handler(CommandHandler("summary", _on_message))
+    ptb_app.add_handler(CommandHandler("start", _on_message))
 
+    await ptb_app.initialize()
+
+    # Webhook 등록
+    if WEBHOOK_URL:
+        await ptb_app.bot.set_webhook(url=WEBHOOK_URL)
+        logger.info("Webhook 등록 완료: %s", WEBHOOK_URL)
+    else:
+        logger.warning(
+            "SPACE_HOST 환경변수 미설정 → Webhook URL을 알 수 없습니다. "
+            "HF Spaces Secrets에 SPACE_HOST를 설정하거나 "
+            "자동으로 설정될 때까지 기다리세요."
+        )
+
+    # 스케줄러 시작
     scheduler = AsyncIOScheduler(timezone=TIMEZONE)
     scheduler.add_job(
         _daily_job,
         CronTrigger(hour=DAILY_HOUR, minute=DAILY_MINUTE),
         id="daily_summary",
     )
-
-    async def post_init(application):
-        scheduler.start()
-        logger.info("매일 %s:%s (%s) 에 요약 전송 예약됨", DAILY_HOUR, DAILY_MINUTE, TIMEZONE)
-
-    app = (
-        Application.builder()
-        .token(TELEGRAM_BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
-    app.add_handler(MessageHandler(filters.TEXT, _on_message))
-    app.add_handler(CommandHandler("summary", _on_message))
-    app.add_handler(CommandHandler("start", _on_message))
-    app.run_polling(allowed_updates=["message"])
+    scheduler.start()
+    logger.info("매일 %s:%s (%s) 에 요약 전송 예약됨", DAILY_HOUR, DAILY_MINUTE, TIMEZONE)
 
 
+@fastapi_app.on_event("shutdown")
+async def on_shutdown():
+    """서버 종료 시: Webhook 해제."""
+    if ptb_app:
+        await ptb_app.bot.delete_webhook()
+        await ptb_app.shutdown()
+        logger.info("Webhook 해제 완료")
+
+
+# ── 직접 실행 시 (로컬 테스트용) ─────────────────────────────────────
 if __name__ == "__main__":
-    main()
+    import uvicorn
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=PORT)

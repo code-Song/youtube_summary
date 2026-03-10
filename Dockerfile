@@ -16,8 +16,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # HF Spaces 영구 스토리지 마운트 포인트
-# /data 폴더는 컨테이너 재시작 후에도 유지됨
 RUN mkdir -p /data
 
-# 실행
-CMD ["python", "utube_summary.py"]
+# HF Spaces 기본 포트: 7860
+EXPOSE 7860
+
+# uvicorn으로 FastAPI 서버 실행
+CMD ["uvicorn", "utube_summary:fastapi_app", "--host", "0.0.0.0", "--port", "7860"]
