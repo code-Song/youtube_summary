@@ -38,8 +38,14 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ── 환경변수 ──────────────────────────────────────────────────────────
-SPACE_HOST = os.environ.get("SPACE_HOST", "")
-WEBHOOK_URL = f"https://{SPACE_HOST}/webhook" if SPACE_HOST else ""
+# HF Spaces: SPACE_HOST / Render.com: RENDER_EXTERNAL_HOSTNAME / 직접 설정: WEBHOOK_HOST
+_host = (
+    os.environ.get("SPACE_HOST")
+    or os.environ.get("RENDER_EXTERNAL_HOSTNAME")
+    or os.environ.get("WEBHOOK_HOST")
+    or ""
+)
+WEBHOOK_URL = f"https://{_host}/webhook" if _host else ""
 PORT = int(os.environ.get("PORT", "7860"))
 
 # 전역

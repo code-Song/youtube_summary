@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: youtube-summary-bot
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    envVars:
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false          # Render 대시보드에서 직접 입력
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: YOUTUBE_CHANNELS_TXT
+        sync: false
+      - key: YOUTUBE_TOKEN_JSON
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-1.5-pro
+      - key: DAILY_HOUR
+        value: "6"
+      - key: DAILY_MINUTE
+        value: "0"
+      - key: TZ
+        value: Asia/Seoul
+      - key: PORT
+        value: "7860"
+      # SPACE_HOST 대신 RENDER_EXTERNAL_URL 사용
+      - key: RENDER_EXTERNAL_HOSTNAME
+        fromService:
+          name: youtube-summary-bot
+          type: web
+          property: host
