@@ -29,6 +29,11 @@ def get_transcript(video_id: str) -> Optional[str]:
                 continue
             except TranscriptsDisabled:
                 return None
+            except Exception as e:
+                # Render 같은 클라우드 IP 차단(CouldNotRetrieveTranscript 등) 예외 방어
+                import logging
+                logging.getLogger(__name__).warning("자막 추출 오류 (IP 차단 의심): %s", e)
+                return None
         return None
     except ImportError:
         return None
