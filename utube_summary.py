@@ -203,7 +203,7 @@ async def _handle_update(update: Update):
 async def _init_bot_with_retry():
     """
     FastAPI 기동 후 백그라운드에서 Telegram 봇 초기화.
-    네트워크가 준비될 때까지 최대 10회 재시도 (간격: 30초).
+    성공할 때까지 무제한 재시도 (간격: 30초).
     """
     global _bot, _bot_ready
 
@@ -217,31 +217,35 @@ async def _init_bot_with_retry():
     # 초기 대기 (컨테이너 네트워크 완전 초기화 대기)
     await asyncio.sleep(5)
 
-    for attempt in range(1, 11):
+    attempt = 0
+    while True:
+        attempt += 1
         try:
-            # get_me()로 봇 토큰 검증 (네트워크 필요)
             me = await _bot.get_me()
             logger.info("봇 초기화 성공: @%s", me.username)
             _bot_ready = True
 
-            # Webhook 등록
+            # 현재 등록된 webhook 정보 확인
+            info = await _bot.get_webhook_info()
+            logger.info("현재 Webhook 상태: url=%s, pending=%s",
+                        info.url, info.pending_update_count)
+
+            # Webhook 등록 (항상 최신 URL로 갱신)
             if WEBHOOK_URL:
                 await _bot.set_webhook(url=WEBHOOK_URL)
                 logger.info("Webhook 등록 완료: %s", WEBHOOK_URL)
             else:
                 logger.warning(
-                    "SPACE_HOST 미설정 → Webhook URL 불명. "
-                    "/setup-webhook 엔드포인트를 통해 수동 등록하세요."
+                    "WEBHOOK_HOST/RENDER_EXTERNAL_HOSTNAME/SPACE_HOST 중 하나를 "
+                    "환경변수로 설정하거나 /setup-webhook 엔드포인트를 호출하세요."
                 )
             return
 
         except Exception as e:
             logger.warning(
-                "봇 초기화 시도 %d/10 실패: %s. 30초 후 재시도...", attempt, e
+                "봇 초기화 시도 %d 실패: %s. 30초 후 재시도...", attempt, e
             )
             await asyncio.sleep(30)
-
-    logger.error("봇 초기화 10회 모두 실패. 네트워크 환경을 확인하세요.")
 
 
 # ── FastAPI 엔드포인트 ────────────────────────────────────────────────
@@ -313,13 +317,8 @@ async def on_startup():
 
 @fastapi_app.on_event("shutdown")
 async def on_shutdown():
-    """종료 시 Webhook 해제."""
-    if _bot and _bot_ready:
-        try:
-            await _bot.delete_webhook()
-            logger.info("Webhook 해제 완료")
-        except Exception as e:
-            logger.warning("Webhook 해제 실패: %s", e)
+    """종료 시 처리 — Webhook은 유지 (재시작 후에도 계속 수신하기 위해)."""
+    logger.info("서버 종료. Webhook은 Telegram에 유지됩니다.")
 
 
 # ── 로컬 실행 ─────────────────────────────────────────────────────────
